@@ -168,6 +168,7 @@ def gen_programs(program_len, num_programs, args):
 
     input_type_combinations = get_input_type_combinations(params.num_inputs)
     programs = gen_prog_pool.map(gen_program_worker, input_type_combinations)
+    gen_prog_pool.close()
     print('')
 
     # Flatten
@@ -182,6 +183,7 @@ def gen_programs(program_len, num_programs, args):
                                                        args.num_examples, args.num_example_tries))
 
     res = gen_examples_pool.map(gen_examples_worker, programs)
+    gen_examples_pool.close()
     print('')
     examples = dict(zip(programs, res))
     examples = {k: v for k, v in examples.items() if v}
@@ -285,7 +287,7 @@ def main():
         examples = {}
         min_len = 0
 
-    for program_len in range(min_len + 1, args.max_train_len + 1):
+    for program_len in range(min_len + 1, args.max_train_len + 1):        
         num_programs = args.num_train + args.num_test
         if program_len in KNOWN_TRAIN_SIZES:
             num_programs = min(num_programs, KNOWN_TRAIN_SIZES[program_len])
@@ -302,6 +304,7 @@ def main():
 
         new_example_parts = [{p: new_examples[p] for p in programs} for programs in new_program_parts]
         res = discard_pool.map(discard_identical_worker, new_example_parts)
+        discard_pool.close()
         print('')
         for d in res:
             examples.update(d)
