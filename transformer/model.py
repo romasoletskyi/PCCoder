@@ -14,7 +14,7 @@ class PointerHead(nn.Module):
         self.w_query = nn.Linear(emb_size, emb_size)
         self.w_key = nn.Linear(emb_size, emb_size)
 
-    def forward(self, x, mask):
+    def forward(self, x, mask=None):
         """
         Args:
             x: Tensor, shape [batch_size, seq_len, embedding_dim]
@@ -25,8 +25,13 @@ class PointerHead(nn.Module):
         emb_size = x.shape[-1]
         query = self.w_query(x)
         key = self.w_key(x)
-        scores = torch.sum(query.unsqueeze(2) * key.unsqueeze(1), dim=4) / emb_size ** (1 / 2)
-        return scores * mask.unsqueeze(0)
+
+        if mask is None:
+            scores = torch.bmm(query, key.transpose(-2, -1))
+        else:
+            scores = torch.baddbmm(mask, query, key.transpose(-2, -1))
+
+        return scores / emb_size ** (1 / 2)
 
 
 class PositionalEncoding(nn.Module):
@@ -113,12 +118,11 @@ class PCCoder(BaseModel):
         super(PCCoder, self).__init__()
         self.encoder = Encoder()
         self.operator_head = nn.Linear(params.dense_output_size, num_operators)
-        self.first_variable_head = PointerHead(params.dense_output_size)
-        self.second_variable_head = PointerHead(params.dense_output_size)
+        self.variables_head = nn.ModuleList([PointerHead(params.dense_output_size) for _ in range(2)])
 
     def forward(self, x):
         x = self.encoder(x)
-        return self.operator_head(x), self.first_variable_head(x), self.second_variable_head(x)
+        return (self.operator_head(x),) + tuple(head(x) for head in self.variables_head)
 
     def predict(self, x):
         pass
