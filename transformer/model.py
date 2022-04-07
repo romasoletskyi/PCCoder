@@ -11,17 +11,22 @@ from env.operator import num_operators
 class PointerHead(nn.Module):
     def __init__(self, emb_size):
         super().__init__()
-        self.lin = nn.Linear(emb_size, emb_size)
-        self.vec = nn.Linear(emb_size, 1, bias=False)
+        self.w_query = nn.Linear(emb_size, emb_size)
+        self.w_key = nn.Linear(emb_size, emb_size)
 
-    def forward(self, x):
+    def forward(self, x, mask):
         """
         Args:
             x: Tensor, shape [batch_size, seq_len, embedding_dim]
+            mask: Tensor, shape [seq_len, seq_len]
 
-        Returns: probability distribution, shape [batch_size, seq_len]
+        Returns: probability distribution, shape [batch_size, seq_len, seq_len]
         """
-        return self.vec(F.selu(self.lin(x))).squeeze(dim=2)
+        emb_size = x.shape[-1]
+        query = self.w_query(x)
+        key = self.w_key(x)
+        scores = torch.sum(query.unsqueeze(2) * key.unsqueeze(1), dim=4) / emb_size ** (1 / 2)
+        return scores * mask.unsqueeze(0)
 
 
 class PositionalEncoding(nn.Module):
@@ -56,7 +61,7 @@ class Encoder(nn.Module):
 
         self.transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(params.var_encoder_size, 8, 1024, activation=F.selu, batch_first=True), 5)
-        self.decoder = nn.Linear(params.var_encoder_size, params.dense_output_size)
+        self.encoder = nn.Linear(params.var_encoder_size, params.dense_output_size)
 
     def forward(self, x):
         x, num_batches = self.embed_state(x)
@@ -116,7 +121,4 @@ class PCCoder(BaseModel):
         return self.operator_head(x), self.first_variable_head(x), self.second_variable_head(x)
 
     def predict(self, x):
-        statement_pred, drop_pred, _ = self.forward(x)
-        statement_probs = F.softmax(statement_pred, dim=-1).data
-        drop_indx = np.argmax(drop_pred.data.cpu().numpy(), axis=-1)
-        return np.argsort(statement_probs.cpu().numpy()), statement_probs, drop_indx
+        pass
