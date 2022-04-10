@@ -8,13 +8,13 @@ import itertools
 class IncompleteStatement(object):
     def __init__(self, func, args):
         self.func = func
-        self.args = args
+        self.args = tuple(args)
 
     def __repr__(self):
         return "<IncompleteStatement: %s %s>" % (self.func, self.args)
 
     def __eq__(self, other):
-        if isinstance(other, IncompleteStatement):
+        if not isinstance(other, IncompleteStatement):
             return False
         return self.func == other.func and self.args == other.args
 
@@ -40,7 +40,7 @@ def parse_args(func, args):
             dropped_args.append(arg)
 
     variables += [0] * (params.num_variable_head - len(variables))
-    variable_mask += [0] * (params.num_variable_head - len(variables))
+    variable_mask += [0] * (params.num_variable_head - len(variable_mask))
 
     return IncompleteStatement(func, dropped_args), variables, variable_mask
 
