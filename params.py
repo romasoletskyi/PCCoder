@@ -25,3 +25,5 @@ dfs_max_width = 50
 cab_beam_size = 100
 cab_width = 10
 cab_width_growth = 10
+
+num_variable_head = 2

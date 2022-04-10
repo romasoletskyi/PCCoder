@@ -5,7 +5,7 @@ from torch import nn
 
 import params
 from cuda import use_cuda
-from env.operator import num_operators
+from transformer.statement import num_incomplete_statements
 
 
 class PointerHead(nn.Module):
@@ -65,16 +65,19 @@ class Encoder(nn.Module):
         self.pos_encoding = PositionalEncoding(params.var_encoder_size)
 
         self.transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(params.var_encoder_size, 8, 1024, activation=F.selu, batch_first=True), 5)
+            nn.TransformerEncoderLayer(params.var_encoder_size, 8, 1024, batch_first=True), 5)
         self.encoder = nn.Linear(params.var_encoder_size, params.dense_output_size)
 
-    def forward(self, x):
+    def forward(self, x, mask):
         x, num_batches = self.embed_state(x)
-        x = F.selu(self.var_encoder(x)).view(num_batches * params.num_examples, params.state_len, -1)
+        x = F.relu(self.var_encoder(x)).view(num_batches * params.num_examples, params.state_len, -1)
         x = self.pos_encoding(x)
-        x = self.transformer(x)  # x: [num_batches * params.num_examples, params.state_len, params.var_encoder_size]
-        x = F.selu(self.encoder(x))
+
+        # x: [num_batches * params.num_examples, params.state_len, params.var_encoder_size]
+        x = self.transformer(x, src_mask=mask)
+        x = F.relu(self.encoder(x))
         x = x.view(num_batches, params.num_examples, params.state_len, -1).mean(dim=1)
+
         return x  # x: [num_batches, params.state_len, params.dense_output_size]
 
     def embed_state(self, x):
@@ -117,12 +120,19 @@ class PCCoder(BaseModel):
     def __init__(self):
         super(PCCoder, self).__init__()
         self.encoder = Encoder()
-        self.operator_head = nn.Linear(params.dense_output_size, num_operators)
-        self.variables_head = nn.ModuleList([PointerHead(params.dense_output_size) for _ in range(2)])
+        self.operator_head = nn.Linear(params.dense_output_size, num_incomplete_statements)
+        self.variables_head = nn.ModuleList([PointerHead(params.dense_output_size)
+                                             for _ in range(params.num_variable_head)])
 
-    def forward(self, x):
-        x = self.encoder(x)
-        return (self.operator_head(x),) + tuple(head(x) for head in self.variables_head)
+    def forward(self, x, mask):
+        x = self.encoder(x, mask)
+        return (self.operator_head(x),) + tuple(head(x, mask) for head in self.variables_head)
 
     def predict(self, x):
         pass
+
+
+def generate_mask(size):
+    mask = torch.triu(torch.ones(size, size) * float('-inf'), diagonal=1)
+    mask[:, -1] = 0
+    return mask
