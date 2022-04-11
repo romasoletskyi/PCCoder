@@ -51,7 +51,7 @@ class PositionalEncoding(nn.Module):
         Args:
             x: Tensor, shape [batch_size, seq_len, embedding_dim]
         """
-        x = x + self.pe[:x.size(0)].transpose(0, 1)
+        x = x + self.pe[:x.size(0)]
         return self.dropout(x)
 
 
@@ -74,7 +74,7 @@ class Encoder(nn.Module):
         x = self.pos_encoding(x)
 
         # x: [num_batches * params.num_examples, params.state_len, params.var_encoder_size]
-        x = self.transformer(x, src_mask=mask)
+        x = self.transformer(x, mask=mask)
         x = F.relu(self.encoder(x))
         x = x.view(num_batches, params.num_examples, params.state_len, -1).mean(dim=1)
 
@@ -135,4 +135,5 @@ class PCCoder(BaseModel):
 def generate_mask(size):
     mask = torch.triu(torch.ones(size, size) * float('-inf'), diagonal=1)
     mask[:, -1] = 0
+    mask[-1, :-1] = float('-inf')
     return mask

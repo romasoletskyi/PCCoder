@@ -1,26 +1,21 @@
 from __future__ import absolute_import, division, print_function, unicode_literals
 import argparse
 import json
-import random
 import torch
 import multiprocessing
 
 import numpy as np
-from torch.utils.data import TensorDataset, DataLoader
-from torch.autograd import Variable
+from torch.utils.data import Dataset, DataLoader
 from torch import nn
 from tqdm import tqdm
 
 import params
-from model.model import PCCoder
-from cuda import use_cuda, LongTensor, FloatTensor
 from env.env import ProgramEnv
-from env.operator import Operator, operator_to_index
-from env.statement import Statement, statement_to_index
 from dsl.program import Program
 from dsl.example import Example
 
 from transformer.statement import parse_args, incomplete_statement_to_index, num_incomplete_statements
+from transformer.model import PCCoder, generate_mask
 
 learn_rate = 0.001
 batch_size = 100
@@ -49,6 +44,7 @@ def generate_prog_data(line):
     variables = []
     variable_mask = []
 
+    # TODO parse program with more than one input - special mask
     for i, statement in enumerate(program.statements):
         # Translate absolute indices to post-drop indices
         f, args = statement.function, list(statement.args)
@@ -93,104 +89,112 @@ def load_data(fileobj, max_len):
     return np.array(states), np.array(operators), np.array(variables), np.array(variables_mask)
 
 
+class ProgramDataset(Dataset):
+    def __init__(self, states, operators, variables, variables_mask):
+        self.states = states
+        self.operators = operators
+        self.variables = variables
+        self.variables_mask = variables_mask
+
+    def __getitem__(self, index):
+        return self.states[index], self.operators[index], self.variables[:, index], self.variables_mask[:, index]
+
+    def __len__(self):
+        return len(self.states)
+
+
+def program_collate_fn(batch):
+    data = [np.array([x[i] for x in batch]) for i in range(4)]
+    data[2] = np.swapaxes(data[2], 0, 1)
+    data[3] = np.swapaxes(data[3], 0, 1)
+    return data
+
+
+def model_loss(model, device, operator_criterion, var_criterion, batch):
+    for i, array in enumerate(batch):
+        batch[i] = torch.from_numpy(batch[i]).to(device)
+    states, operators, variables, masks = batch
+
+    pred_operators, *pred_variables = model(states, generate_mask(params.state_len))
+    operator_loss = operator_criterion(pred_operators.flatten(end_dim=1), operators.flatten())
+    t = var_criterion(pred_variables[0].flatten(end_dim=1), variables[0].flatten())
+    print([(x.item(), y.item(), z, u.item()) for x, y, z, u in zip(t, masks[0].flatten(), pred_variables[0].flatten(end_dim=1), variables[0].flatten())])
+    variables_losses = [torch.sum(var_criterion(pred_head.flatten(end_dim=1),
+                                                var_head.flatten()) * mask.flatten()) / torch.sum(mask)
+                        for pred_head, var_head, mask in zip(pred_variables, variables, masks)]
+
+    return operator_loss, variables_losses
+
+
 def train(args):
     with open(args.input_path, 'r') as f:
-        data, statement_target, drop_target, operator_target = load_data(f, args.max_len)
+        data, operator_target, var_target, var_mask = load_data(f, args.max_len)
 
-    model = PCCoder()
+    indices = np.arange(len(data))
+    np.random.shuffle(indices)
+    train_size = int(0.9 * len(data))
+    train_indices, test_indices = indices[:train_size], indices[train_size:]
 
-    if use_cuda:
-        model.cuda()
+    train_dataset = ProgramDataset(data[train_indices], operator_target[train_indices],
+                                   var_target[:, train_indices], var_mask[:, train_indices])
+    test_dataset = ProgramDataset(data[test_indices], operator_target[test_indices],
+                                  var_target[:, test_indices], var_mask[:, test_indices])
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=program_collate_fn)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=True, collate_fn=program_collate_fn)
 
-    model = nn.DataParallel(model)
-
-    # The cuda types are not used here on purpose - most GPUs can't handle so much memory
-    data, statement_target, drop_target, operator_target = torch.LongTensor(data), torch.LongTensor(statement_target), \
-                                                    torch.FloatTensor(drop_target), torch.LongTensor(operator_target)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = PCCoder().to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learn_rate)
-
-    statement_criterion = nn.CrossEntropyLoss()
-    var_criterion = nn.CrossEntropyLoss()
-
     lr_sched = torch.optim.lr_scheduler.StepLR(optimizer, step_size=4)
 
-    dataset_size = data.shape[0]
-    indices = list(range(dataset_size))
-    random.shuffle(indices)
-
-    train_size = int(0.9 * dataset_size)
-    train_data = data[indices[:train_size]]
-    train_statement_target = statement_target[indices[:train_size]]
-    train_drop_target = drop_target[indices[:train_size]]
-    train_operator_target = operator_target[indices[:train_size]]
-
-    test_data = Variable(data[indices[train_size:]].type(LongTensor))
-    test_statement_target = Variable(statement_target[indices[train_size:]].type(LongTensor))
-    test_drop_target = Variable(drop_target[indices[train_size:]].type(FloatTensor))
-    test_operator_target = Variable(operator_target[indices[train_size:]].type(LongTensor))
-
-    train_dataset = TensorDataset(train_data, train_statement_target, train_drop_target, train_operator_target)
-    data_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    operator_criterion = nn.CrossEntropyLoss()
+    var_criterion = nn.CrossEntropyLoss(reduction='none')
 
     for epoch in range(num_epochs):
         model.train()
         print("Epoch %d" % epoch)
-        lr_sched.step()
 
-        statement_losses = []
+        operator_losses = []
         var_losses = []
 
-        for batch in tqdm(data_loader):
-            current_state, next_operator, next_vars, var_mask = batch
-
+        for batch in tqdm(train_loader):
             optimizer.zero_grad()
-            pred_operator, pred_first_var, pred_second_var = model(current_state)
+            operator_loss, variables_loss = model_loss(model, device, operator_criterion, var_criterion, batch)
 
-            statement_loss = statement_criterion(pred_operator, next_operator)
-            var_loss = sum(var_criterion(pred_first_var, var) * mask for var, mask in zip(next_vars, var_mask))
-            loss = statement_loss + var_loss
-
-            statement_losses.append(statement_loss.item())
-            var_losses.append(var_loss.item())
+            loss = operator_loss + sum(var_loss for var_loss in variables_loss)
+            operator_losses.append(operator_loss.item())
+            var_losses.append(np.mean([var_loss.item() for var_loss in variables_loss]))
 
             loss.backward()
             optimizer.step()
 
-        avg_statement_train_loss = np.array(statement_losses).mean()
+        lr_sched.step()
+
+        avg_statement_train_loss = np.array(operator_losses).mean()
         avg_var_train_loss = np.array(var_losses).mean()
 
         print("Train loss: S %f" % avg_statement_train_loss, "V %f" % avg_var_train_loss)
-        """
+
         model.eval()
+        operator_losses = []
+        var_losses = []
 
         with torch.no_grad():
-            # Iterate through test set to avoid out of memory issues
-            statement_pred, drop_pred, operator_pred = [], [], []
-            for i in range(0, len(test_data), test_iterator_size):
-                output = model(test_data[i: i + test_iterator_size])
-                statement_pred.append(output[0])
-                drop_pred.append(output[1])
-                operator_pred.append(output[2])
+            for batch in tqdm(test_loader):
+                operator_loss, variables_loss = model_loss(model, device, operator_criterion, var_criterion, batch)
 
-            statement_pred = torch.cat(statement_pred, dim=0)
-            drop_pred = torch.cat(drop_pred, dim=0)
-            operator_pred = torch.cat(operator_pred, dim=0)
+                loss = operator_loss + sum(var_loss for var_loss in variables_loss)
+                operator_losses.append(operator_loss.item())
+                var_losses.append(np.mean([var_loss.item() for var_loss in variables_loss]))
 
-            test_statement_loss = statement_criterion(statement_pred, test_statement_target)
-            test_drop_loss = drop_criterion(drop_pred, test_drop_target)
-            test_operator_loss = operator_criterion(operator_pred, test_operator_target)
+            avg_statement_test_loss = np.array(operator_losses).mean()
+            avg_var_test_loss = np.array(var_losses).mean()
 
-            print("Train loss: S %f" % avg_statement_train_loss, "D %f" % avg_drop_train_loss,
-                  "F %f" % avg_operator_train_loss)
-            print("Test loss: S %f" % test_statement_loss.item(), "D %f" % test_drop_loss.item(),
-                  "F %f" % test_operator_loss.item())
+            print("Train loss: O %f" % avg_statement_train_loss, "V %f" % avg_var_train_loss)
+            print("Test loss: O %f" % avg_statement_test_loss, "V %f" % avg_var_test_loss)
 
-            predict = statement_pred.data.max(1)[1]
-            test_error = (predict != test_statement_target.data).sum().item() / float(test_data.shape[0])
-            print("Test classification error: %f" % test_error)
-        """
-        model.module.save(args.output_path + ".%d" % epoch)
+        model.save(args.output_path + ".%d" % epoch)
 
 
 if __name__ == '__main__':
