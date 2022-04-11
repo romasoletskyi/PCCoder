@@ -20,7 +20,7 @@ from env.statement import Statement, statement_to_index
 from dsl.program import Program
 from dsl.example import Example
 
-from transformer.statement import parse_args, incomplete_statement_to_index
+from transformer.statement import parse_args, incomplete_statement_to_index, num_incomplete_statements
 
 learn_rate = 0.001
 batch_size = 100
@@ -67,10 +67,10 @@ def generate_prog_data(line):
 
 
 def load_data(fileobj, max_len):
-    X = []
-    Y = []
-    Z = []
-    W = []
+    states = []
+    operators = []
+    variables = [[] for _ in range(params.num_variable_head)]
+    variables_mask = [[] for _ in range(params.num_variable_head)]
 
     print("Loading dataset...")
     lines = fileobj.read().splitlines()
@@ -81,13 +81,16 @@ def load_data(fileobj, max_len):
     res = list(tqdm(pool.imap(generate_prog_data, lines), total=len(lines)))
     pool.close()
 
-    for input, target, to_drop, operators in res:
-        X += input
-        Y += target
-        Z += to_drop
-        W += operators
+    for state, operator_list, variable_list, mask_list in res:
+        states.append(state)
+        num_empty_steps = params.state_len - len(operator_list)
+        operators.append(operator_list + [num_incomplete_statements] * num_empty_steps)
 
-    return np.array(X), np.array(Y), np.array(Z), np.array(W)
+        for i in range(params.num_variable_head):
+            variables[i].append([var[i] for var in variable_list] + [0] * num_empty_steps)
+            variables_mask[i].append([mask[i] for mask in mask_list] + [0] * num_empty_steps)
+
+    return np.array(states), np.array(operators), np.array(variables), np.array(variables_mask)
 
 
 def train(args):

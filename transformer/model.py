@@ -120,7 +120,7 @@ class PCCoder(BaseModel):
     def __init__(self):
         super(PCCoder, self).__init__()
         self.encoder = Encoder()
-        self.operator_head = nn.Linear(params.dense_output_size, num_incomplete_statements)
+        self.operator_head = nn.Linear(params.dense_output_size, num_incomplete_statements + 1)
         self.variables_head = nn.ModuleList([PointerHead(params.dense_output_size)
                                              for _ in range(params.num_variable_head)])
 
