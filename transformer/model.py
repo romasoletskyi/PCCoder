@@ -132,8 +132,9 @@ class PCCoder(BaseModel):
         pass
 
 
-def generate_mask(size):
-    mask = torch.triu(torch.ones(size, size) * float('-inf'), diagonal=1)
-    mask[:, -1] = 0
-    mask[-1, :-1] = float('-inf')
+def generate_mask():
+    mask = torch.zeros(params.state_len, params.state_len)
+    mask[:params.num_inputs + 1, params.num_inputs + 1:] = float('-inf')
+    mask[params.num_inputs + 1:, params.num_inputs + 1:] =\
+        torch.triu(torch.ones(params.max_program_len, params.max_program_len) * float('-inf'), diagonal=1)
     return mask

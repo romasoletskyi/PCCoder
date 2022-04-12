@@ -16,6 +16,7 @@ from dsl.example import Example
 
 from transformer.statement import parse_args, incomplete_statement_to_index, num_incomplete_statements
 from transformer.model import PCCoder, generate_mask
+from transformers.optimization import get_linear_schedule_with_warmup
 
 learn_rate = 0.001
 batch_size = 100
@@ -44,7 +45,6 @@ def generate_prog_data(line):
     variables = []
     variable_mask = []
 
-    # TODO parse program with more than one input - special mask
     for i, statement in enumerate(program.statements):
         # Translate absolute indices to post-drop indices
         f, args = statement.function, list(statement.args)
@@ -52,7 +52,7 @@ def generate_prog_data(line):
             if isinstance(arg, int):
                 args[j] = env.real_var_idxs.index(arg)
 
-        operator, var, var_mask = parse_args(f, args)
+        operator, var, var_mask = parse_args(f, args, env.states[0].num_inputs)
         operators.append(incomplete_statement_to_index[operator])
         variables.append(var)
         variable_mask.append(var_mask)
@@ -79,7 +79,7 @@ def load_data(fileobj, max_len):
 
     for state, operator_list, variable_list, mask_list in res:
         states.append(state)
-        num_empty_steps = params.state_len - len(operator_list)
+        num_empty_steps = params.max_program_len - len(operator_list)
         operators.append(operator_list + [num_incomplete_statements] * num_empty_steps)
 
         for i in range(params.num_variable_head):
@@ -115,10 +115,11 @@ def model_loss(model, device, operator_criterion, var_criterion, batch):
         batch[i] = torch.from_numpy(batch[i]).to(device)
     states, operators, variables, masks = batch
 
-    pred_operators, *pred_variables = model(states, generate_mask(params.state_len))
+    pred_operators, *pred_variables = model(states, generate_mask())
+    pred_operators = pred_operators[:, params.num_inputs:-1]
+    pred_variables = [pred_var[:, params.num_inputs:-1] for pred_var in pred_variables]
+
     operator_loss = operator_criterion(pred_operators.flatten(end_dim=1), operators.flatten())
-    t = var_criterion(pred_variables[0].flatten(end_dim=1), variables[0].flatten())
-    print([(x.item(), y.item(), z, u.item()) for x, y, z, u in zip(t, masks[0].flatten(), pred_variables[0].flatten(end_dim=1), variables[0].flatten())])
     variables_losses = [torch.sum(var_criterion(pred_head.flatten(end_dim=1),
                                                 var_head.flatten()) * mask.flatten()) / torch.sum(mask)
                         for pred_head, var_head, mask in zip(pred_variables, variables, masks)]
@@ -146,7 +147,10 @@ def train(args):
     model = PCCoder().to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=learn_rate)
-    lr_sched = torch.optim.lr_scheduler.StepLR(optimizer, step_size=4)
+    lr_sched = get_linear_schedule_with_warmup(
+        optimizer, num_warmup_steps=8,
+        num_training_steps=num_epochs
+    )
 
     operator_criterion = nn.CrossEntropyLoss()
     var_criterion = nn.CrossEntropyLoss(reduction='none')

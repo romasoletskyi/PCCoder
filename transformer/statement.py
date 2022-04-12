@@ -22,7 +22,7 @@ class IncompleteStatement(object):
         return hash(str(self))
 
 
-def parse_args(func, args):
+def parse_args(func, args, num_inputs):
     input_type = func.input_type
     if not isinstance(input_type, tuple):
         input_type = (input_type,)
@@ -34,7 +34,7 @@ def parse_args(func, args):
     for type, arg in zip(input_type, args):
         if type in [LIST, INT]:
             dropped_args.append(None)
-            variables.append(arg)
+            variables.append(arg if arg < num_inputs else arg + 1 + (params.num_inputs - num_inputs))
             variable_mask.append(1)
         else:
             dropped_args.append(arg)
