@@ -45,10 +45,12 @@ class ProgramState(object):
             self.output_idx = out_idx
 
     def get_encoding(self):
-        encoded_vars = [var.encoded for var in self._vars]
-        if len(encoded_vars) < params.max_program_vars:
-            encoded_vars.extend([NULLVALUE.encoded] * (params.max_program_vars - len(self._vars)))
-        return np.array(encoded_vars + [self.output.encoded])
+        encoded_vars = [self._vars[i].encoded for i in range(self.num_inputs)]
+        encoded_vars += [NULLVALUE.encoded] * (params.num_inputs - self.num_inputs)
+        encoded_vars += [self.output.encoded]
+        encoded_vars += [self._vars[i].encoded for i in range(self.num_inputs, len(self._vars))]
+        encoded_vars += [NULLVALUE.encoded] * (params.state_len - len(encoded_vars))
+        return np.array(encoded_vars)
 
     def is_solution(self):
         return self._vars[self.output_idx] == self.output
