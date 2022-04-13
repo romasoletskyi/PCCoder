@@ -4,7 +4,7 @@ import multiprocessing
 import torch
 
 import params
-from model.model import PCCoder
+from transformer.model import PCCoder
 from env.env import ProgramEnv
 from env.search import cab, dfs
 from dsl.example import Example

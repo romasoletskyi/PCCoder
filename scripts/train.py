@@ -97,6 +97,7 @@ def load_data(fileobj, max_len):
 
     pool = multiprocessing.Pool()
     res = list(tqdm(pool.imap(generate_prog_data, lines), total=len(lines)))
+    pool.close()
 
     for input, target, to_drop, operators in res:
         X += input

@@ -3,6 +3,7 @@ from dsl.types import FunctionType, INT, LIST
 
 import params
 import itertools
+import torch
 
 
 class IncompleteStatement(object):
@@ -34,7 +35,10 @@ def parse_args(func, args, num_inputs):
     for type, arg in zip(input_type, args):
         if type in [LIST, INT]:
             dropped_args.append(None)
-            variables.append(arg if arg < num_inputs else arg + 1 + (params.num_inputs - num_inputs))
+            if isinstance(num_inputs, int):
+                variables.append(arg if arg < num_inputs else arg + 1 + (params.num_inputs - num_inputs))
+            else:
+                variables.append(torch.where(arg < num_inputs, arg, arg + 1 + (params.num_inputs - num_inputs)))
             variable_mask.append(1)
         else:
             dropped_args.append(arg)

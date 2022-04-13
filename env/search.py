@@ -4,6 +4,7 @@ import params
 from env.statement import index_to_statement
 
 import torch
+import numpy as np
 
 FAILED_SOLUTION = [None]
 
@@ -109,10 +110,12 @@ def beam_search(env, max_depth, model, beam_size, expansion_size, state):
         new_beams = []
 
         env_encodings = [beam[0].get_encoding() for beam in beams]
-        env_encodings = torch.LongTensor(env_encodings)
-        statement_pred, statement_probs, drop_indx = model.predict(env_encodings)
+        num_inputs = torch.tensor(np.array([beam[0].states[0].num_inputs for beam in beams]))
+        num_vars = torch.tensor(np.array([beam[0].num_vars for beam in beams]))
+        env_encodings = torch.tensor(np.array(env_encodings))
+        statement_pred, statement_log_probs, drop_indx = model.predict(env_encodings, num_inputs, num_vars)
 
-        for beam_num, (env, statements, prob) in enumerate(beams):
+        for beam_num, (env, statements, log_prob) in enumerate(beams):
             if time.time() >= state['end_time']:
                 return FAILED_SOLUTION
 
@@ -130,7 +133,7 @@ def beam_search(env, max_depth, model, beam_size, expansion_size, state):
 
                 state['num_steps'] += 1
                 new_beams.append((new_env, statements + [env.statement_to_real_idxs(statement)],
-                                  prob * statement_probs[beam_num, statement_index]))
+                                  log_prob + statement_log_probs[beam_num, statement_index]))
 
         if len(new_beams) == 0:
             return FAILED_SOLUTION
@@ -138,7 +141,7 @@ def beam_search(env, max_depth, model, beam_size, expansion_size, state):
         new_beams = sorted(new_beams, key=lambda x: x[2], reverse=True)[:beam_size]
         return helper(new_beams, state)
 
-    res = helper([(env, [], 1)], state)
+    res = helper([(env, [], 0)], state)
     if res == FAILED_SOLUTION:
         res = False
 

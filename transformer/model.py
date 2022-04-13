@@ -5,7 +5,8 @@ from torch import nn
 
 import params
 from cuda import use_cuda
-from transformer.statement import num_incomplete_statements
+from transformer.statement import num_incomplete_statements,incomplete_statement_to_index,  parse_args
+from env.statement import num_statements, index_to_statement
 
 
 class PointerHead(nn.Module):
@@ -128,8 +129,41 @@ class PCCoder(BaseModel):
         x = self.encoder(x, mask)
         return (self.operator_head(x),) + tuple(head(x, mask) for head in self.variables_head)
 
-    def predict(self, x):
-        pass
+    def predict(self, x, num_inputs, num_vars):
+        with torch.no_grad():
+            operator_pred, *variables_pred = self.forward(x, generate_mask())
+
+            batch_indices = torch.arange(len(num_inputs))
+            operator_pred = logit_to_log_prob(operator_pred[batch_indices, params.num_inputs + (num_vars - num_inputs)])
+            variables_pred = [var_pred[batch_indices, params.num_inputs + (num_vars - num_inputs)]
+                              for var_pred in variables_pred]
+
+            index_mask = torch.arange(params.state_len).repeat(len(num_inputs), 1)
+            zero_mask = (index_mask >= num_inputs[:, None]) & (index_mask <= params.num_inputs)
+            for i in range(params.num_variable_head):
+                variables_pred[i][zero_mask] = -torch.inf
+                variables_pred[i] = logit_to_log_prob(variables_pred[i])
+
+            statement_log_probs = torch.zeros(len(num_inputs), num_statements)
+            for i, statement in index_to_statement.items():
+                func, args = statement.function, statement.args
+                incomplete_statement, variables, variables_mask = parse_args(func, args, num_inputs)
+                operator_index = incomplete_statement_to_index[incomplete_statement]
+
+                statement_log_probs[:, i] = operator_pred[:, operator_index]
+                for j in range(params.num_variable_head):
+                    if isinstance(variables[j], int):
+                        if variables[j] >= params.state_len:
+                            statement_log_probs[:, i] -= 1e6
+                        else:
+                            statement_log_probs[:, i] += variables_mask[j] * variables_pred[j][:, variables[j]]
+                    else:
+                        overflow_mask = variables[j] >= params.state_len
+                        variables[j] = torch.clamp(variables[j], max=params.state_len - 1)
+                        statement_log_probs[:, i] += variables_mask[j] * variables_pred[j][batch_indices, variables[j]]
+                        statement_log_probs[:, i] -= 1e6 * overflow_mask
+
+        return np.argsort(statement_log_probs.detach().numpy()), statement_log_probs, None
 
 
 def generate_mask():
@@ -138,3 +172,7 @@ def generate_mask():
     mask[params.num_inputs + 1:, params.num_inputs + 1:] =\
         torch.triu(torch.ones(params.max_program_len, params.max_program_len) * float('-inf'), diagonal=1)
     return mask
+
+
+def logit_to_log_prob(x):
+    return torch.clip(F.log_softmax(x, dim=1), min=-1e6)

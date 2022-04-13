@@ -115,7 +115,7 @@ def model_loss(model, device, operator_criterion, var_criterion, batch):
         batch[i] = torch.from_numpy(batch[i]).to(device)
     states, operators, variables, masks = batch
 
-    pred_operators, *pred_variables = model(states, generate_mask())
+    pred_operators, *pred_variables = model(states, generate_mask().to(device))
     pred_operators = pred_operators[:, params.num_inputs:-1]
     pred_variables = [pred_var[:, params.num_inputs:-1] for pred_var in pred_variables]
 
@@ -178,8 +178,6 @@ def train(args):
         avg_statement_train_loss = np.array(operator_losses).mean()
         avg_var_train_loss = np.array(var_losses).mean()
 
-        print("Train loss: S %f" % avg_statement_train_loss, "V %f" % avg_var_train_loss)
-
         model.eval()
         operator_losses = []
         var_losses = []
@@ -188,7 +186,6 @@ def train(args):
             for batch in tqdm(test_loader):
                 operator_loss, variables_loss = model_loss(model, device, operator_criterion, var_criterion, batch)
 
-                loss = operator_loss + sum(var_loss for var_loss in variables_loss)
                 operator_losses.append(operator_loss.item())
                 var_losses.append(np.mean([var_loss.item() for var_loss in variables_loss]))
 
