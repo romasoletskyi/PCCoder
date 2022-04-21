@@ -5,7 +5,7 @@ from torch import nn
 
 import params
 from cuda import use_cuda
-from transformer.statement import num_incomplete_statements,incomplete_statement_to_index,  parse_args
+from transformer.statement import num_incomplete_statements, incomplete_statement_to_index, parse_args
 from env.statement import num_statements, index_to_statement
 
 
@@ -97,6 +97,57 @@ class Encoder(nn.Module):
         return torch.cat((embedded_values, types), dim=-1), num_batches
 
 
+class BothWiseEncoder(nn.Module):
+    def __init__(self):
+        super(BothWiseEncoder, self).__init__()
+
+        self.embedding = nn.Embedding(params.integer_range + 1, params.embedding_size)
+        self.var_encoder = nn.Linear(params.max_list_len * params.embedding_size + params.type_vector_len,
+                                     params.var_encoder_size)
+        self.pos_encoding = PositionalEncoding(params.var_encoder_size)
+
+        self.word_transformer = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(params.var_encoder_size, 8, 1024, batch_first=True), 5)
+        self.example_transformer = nn.TransformerEncoder(
+            nn.TransformerEncoderLayer(params.var_encoder_size, 8, 1024, batch_first=True), 3)
+        self.encoder = nn.Linear(params.var_encoder_size, params.dense_output_size)
+
+    def forward(self, x, mask):
+        x, num_batches = self.embed_state(x)
+        x = F.relu(self.var_encoder(x)).view(num_batches * params.num_examples, params.state_len, -1)
+        x = self.pos_encoding(x)
+
+        # x: [num_batches * params.num_examples, params.state_len, params.var_encoder_size]
+        x = self.word_transformer(x, mask=mask)
+
+        x = torch.transpose(x.view(num_batches, params.num_examples, params.state_len, params.var_encoder_size), 1,
+                            2).reshape(num_batches * params.state_len, params.num_examples, params.var_encoder_size)
+        # x: [num_batches * params.state_len, params.num_examples, params,var_encoder_size]
+        x = self.example_transformer(x)
+        x = torch.transpose(x.view(num_batches, params.state_len, params.num_examples, params.var_encoder_size), 1,
+                            2)
+
+        x = F.relu(self.encoder(x))
+        x = x.mean(dim=1)
+
+        return x  # x: [num_batches, params.state_len, params.dense_output_size]
+
+    def embed_state(self, x):
+        types = x[:, :, :, :params.type_vector_len]
+        values = x[:, :, :, params.type_vector_len:]
+
+        assert values.size()[1] == params.num_examples, "Invalid num of examples received!"
+        assert values.size()[2] == params.state_len, "Example with invalid length received!"
+        assert values.size()[3] == params.max_list_len, "Example with invalid length received!"
+
+        num_batches = x.size()[0]
+
+        embedded_values = self.embedding(values.contiguous().view(num_batches, -1))
+        embedded_values = embedded_values.view(num_batches, params.num_examples, params.state_len, -1)
+        types = types.contiguous().float()
+        return torch.cat((embedded_values, types), dim=-1), num_batches
+
+
 class BaseModel(nn.Module):
     def load(self, path):
         if use_cuda:
@@ -120,7 +171,7 @@ class BaseModel(nn.Module):
 class PCCoder(BaseModel):
     def __init__(self):
         super(PCCoder, self).__init__()
-        self.encoder = Encoder()
+        self.encoder = BothWiseEncoder()
         self.operator_head = nn.Linear(params.dense_output_size, num_incomplete_statements + 1)
         self.variables_head = nn.ModuleList([PointerHead(params.dense_output_size)
                                              for _ in range(params.num_variable_head)])
@@ -169,7 +220,7 @@ class PCCoder(BaseModel):
 def generate_mask():
     mask = torch.zeros(params.state_len, params.state_len)
     mask[:params.num_inputs + 1, params.num_inputs + 1:] = float('-inf')
-    mask[params.num_inputs + 1:, params.num_inputs + 1:] =\
+    mask[params.num_inputs + 1:, params.num_inputs + 1:] = \
         torch.triu(torch.ones(params.max_program_len, params.max_program_len) * float('-inf'), diagonal=1)
     return mask
 
