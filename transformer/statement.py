@@ -5,6 +5,8 @@ import params
 import itertools
 import torch
 
+from env.statement import index_to_statement
+
 
 class IncompleteStatement(object):
     def __init__(self, func, args):
@@ -35,10 +37,13 @@ def parse_args(func, args, num_inputs):
     for type, arg in zip(input_type, args):
         if type in [LIST, INT]:
             dropped_args.append(None)
-            if isinstance(num_inputs, int):
-                variables.append(arg if arg < num_inputs else arg + 1 + (params.num_inputs - num_inputs))
+            if num_inputs is None:
+                variables.append(arg)
             else:
-                variables.append(torch.where(arg < num_inputs, arg, arg + 1 + (params.num_inputs - num_inputs)))
+                if isinstance(num_inputs, int):
+                    variables.append(arg if arg < num_inputs else arg + 1 + (params.num_inputs - num_inputs))
+                else:
+                    variables.append(torch.where(arg < num_inputs, arg, arg + 1 + (params.num_inputs - num_inputs)))
             variable_mask.append(1)
         else:
             dropped_args.append(arg)
@@ -69,7 +74,27 @@ def build_incomplete_statement_space():
     return statements
 
 
+def build_tensors():
+    statement_to_operator = torch.zeros(len(index_to_statement), dtype=torch.int64)
+    statement_to_variables = [torch.zeros(len(index_to_statement), dtype=torch.int64) for _ in
+                              range(params.num_variable_head)]
+    statement_to_variables_mask = [torch.zeros(len(index_to_statement), dtype=torch.int64) for _ in
+                              range(params.num_variable_head)]
+
+    for i, statement in index_to_statement.items():
+        func, args = statement.function, statement.args
+        incomplete_statement, variables, variables_mask = parse_args(func, args, None)
+        statement_to_operator[i] = incomplete_statement_to_index[incomplete_statement]
+
+        for j in range(params.num_variable_head):
+            statement_to_variables[j][i] = variables[j]
+            statement_to_variables_mask[j][i] = variables_mask[j]
+
+    return statement_to_operator, statement_to_variables, statement_to_variables_mask
+
+
 incomplete_statement_space = build_incomplete_statement_space()
 num_incomplete_statements = len(incomplete_statement_space)
 index_to_incomplete_statement = dict([(indx, statement) for indx, statement in enumerate(incomplete_statement_space)])
 incomplete_statement_to_index = {v: k for k, v in index_to_incomplete_statement.items()}
+statement_to_operator, statement_to_variables, statement_to_variables_mask = build_tensors()

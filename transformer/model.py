@@ -5,7 +5,8 @@ from torch import nn
 
 import params
 from cuda import use_cuda
-from transformer.statement import num_incomplete_statements, incomplete_statement_to_index, parse_args
+from transformer.statement import num_incomplete_statements, incomplete_statement_to_index, parse_args, \
+    statement_to_operator, statement_to_variables, statement_to_variables_mask
 from env.statement import num_statements, index_to_statement
 
 
@@ -180,39 +181,68 @@ class PCCoder(BaseModel):
         x = self.encoder(x, mask)
         return (self.operator_head(x),) + tuple(head(x, mask) for head in self.variables_head)
 
+    def get_prob(self, x, num_inputs, num_vars):
+        operator_pred, *variables_pred = self.forward(x, generate_mask())
+
+        batch_indices = torch.arange(len(num_inputs))
+        operator_pred = logit_to_log_prob(operator_pred[batch_indices, params.num_inputs + (num_vars - num_inputs)])
+        variables_pred = [var_pred[batch_indices, params.num_inputs + (num_vars - num_inputs)]
+                          for var_pred in variables_pred]
+
+        index_mask = torch.arange(params.state_len).repeat(len(num_inputs), 1)
+        zero_mask = (index_mask >= num_inputs[:, None]) & (index_mask <= params.num_inputs)
+        for i in range(params.num_variable_head):
+            variables_pred[i][zero_mask] = -torch.inf
+            variables_pred[i] = logit_to_log_prob(variables_pred[i])
+
+        return operator_pred, variables_pred
+
+    def get_statement_prob_slow(self, num_inputs, operator_pred, variables_pred):
+        batch_indices = torch.arange(len(num_inputs))
+        statement_log_probs = torch.zeros(len(batch_indices), num_statements)
+
+        for i, statement in index_to_statement.items():
+            func, args = statement.function, statement.args
+            incomplete_statement, variables, variables_mask = parse_args(func, args, num_inputs)
+            operator_index = incomplete_statement_to_index[incomplete_statement]
+
+            statement_log_probs[:, i] = operator_pred[:, operator_index]
+            for j in range(params.num_variable_head):
+                if isinstance(variables[j], int):
+                    if variables[j] >= params.state_len:
+                        statement_log_probs[:, i] -= 1e6
+                    else:
+                        statement_log_probs[:, i] += variables_mask[j] * variables_pred[j][:, variables[j]]
+                else:
+                    overflow_mask = variables[j] >= params.state_len
+                    variables[j] = torch.clamp(variables[j], max=params.state_len - 1)
+                    statement_log_probs[:, i] += variables_mask[j] * variables_pred[j][batch_indices, variables[j]]
+                    statement_log_probs[:, i] -= 1e6 * overflow_mask
+
+        return statement_log_probs
+
+    def get_statement_prob(self, num_inputs, operator_pred, variables_pred):
+        batch_indices = torch.arange(len(num_inputs))
+        statement_log_probs = operator_pred[batch_indices[:, None], statement_to_operator[None, :]]
+        statement_to_variables_ = [x[None, :] for x in statement_to_variables]
+
+        for j in range(params.num_variable_head):
+            statement_to_variables_[j] = torch.where(statement_to_variables_[j] < num_inputs[:, None],
+                                                     statement_to_variables_[j],
+                                                     statement_to_variables_[j] + 1 + (
+                                                                 params.num_inputs - num_inputs[:, None]))
+            overflow_mask = statement_to_variables_[j] >= params.state_len
+            statement_to_variables_[j] = torch.clamp(statement_to_variables_[j], max=params.state_len - 1)
+            statement_log_probs += statement_to_variables_mask[j][None, :] * \
+                                   variables_pred[j][batch_indices[:, None], statement_to_variables_[j]]
+            statement_log_probs -= 1e6 * overflow_mask
+
+        return statement_log_probs
+
     def predict(self, x, num_inputs, num_vars):
         with torch.no_grad():
-            operator_pred, *variables_pred = self.forward(x, generate_mask())
-
-            batch_indices = torch.arange(len(num_inputs))
-            operator_pred = logit_to_log_prob(operator_pred[batch_indices, params.num_inputs + (num_vars - num_inputs)])
-            variables_pred = [var_pred[batch_indices, params.num_inputs + (num_vars - num_inputs)]
-                              for var_pred in variables_pred]
-
-            index_mask = torch.arange(params.state_len).repeat(len(num_inputs), 1)
-            zero_mask = (index_mask >= num_inputs[:, None]) & (index_mask <= params.num_inputs)
-            for i in range(params.num_variable_head):
-                variables_pred[i][zero_mask] = -torch.inf
-                variables_pred[i] = logit_to_log_prob(variables_pred[i])
-
-            statement_log_probs = torch.zeros(len(num_inputs), num_statements)
-            for i, statement in index_to_statement.items():
-                func, args = statement.function, statement.args
-                incomplete_statement, variables, variables_mask = parse_args(func, args, num_inputs)
-                operator_index = incomplete_statement_to_index[incomplete_statement]
-
-                statement_log_probs[:, i] = operator_pred[:, operator_index]
-                for j in range(params.num_variable_head):
-                    if isinstance(variables[j], int):
-                        if variables[j] >= params.state_len:
-                            statement_log_probs[:, i] -= 1e6
-                        else:
-                            statement_log_probs[:, i] += variables_mask[j] * variables_pred[j][:, variables[j]]
-                    else:
-                        overflow_mask = variables[j] >= params.state_len
-                        variables[j] = torch.clamp(variables[j], max=params.state_len - 1)
-                        statement_log_probs[:, i] += variables_mask[j] * variables_pred[j][batch_indices, variables[j]]
-                        statement_log_probs[:, i] -= 1e6 * overflow_mask
+            operator_pred, variables_pred = self.get_prob(x, num_inputs, num_vars)
+            statement_log_probs = self.get_statement_prob(num_inputs, operator_pred, variables_pred)
 
         return np.argsort(statement_log_probs.detach().numpy()), statement_log_probs, None
 
