@@ -48,9 +48,14 @@ class Cache:
 
     def resample_cache(self, batch_indices):
         if self.cache is not None:
-            initial_shape = self.cache.shape
-            self.cache = self.cache.view(len(batch_indices), -1)[batch_indices]
-            self.cache = self.cache.reshape(initial_shape)
+            batch_dim, *hidden_dim = self.cache.shape
+            if batch_dim != len(batch_indices):
+                assert batch_dim % len(batch_indices) == 0
+                self.cache = self.cache.reshape(len(batch_indices), batch_dim // len(batch_indices), *hidden_dim)
+
+            self.cache = self.cache[batch_indices]
+            if batch_dim != len(batch_indices):
+                self.cache = self.cache.reshape(batch_dim, *hidden_dim)
         for child in self.cache_children:
             child.resample_cache(batch_indices)
 
@@ -76,13 +81,14 @@ class PointerHead(nn.Module, Cache):
         if self.cache_mode:
             start, end = self.data_slice(mask, 1)
             query = self.w_query(x[:, start:end])
-            scores = torch.bmm(query, key.transpose(-2, -1))
+            mask = mask[start:end, :x.shape[1]]
         else:
             query = self.w_query(x)
-            if mask is None:
-                scores = torch.bmm(query, key.transpose(-2, -1))
-            else:
-                scores = torch.baddbmm(mask, query, key.transpose(-2, -1))
+
+        if mask is None:
+            scores = torch.bmm(query, key.transpose(-2, -1))
+        else:
+            scores = torch.baddbmm(mask, query, key.transpose(-2, -1))
 
         scores /= emb_size ** (1 / 2)
 
@@ -106,6 +112,7 @@ class PositionalEncoding(nn.Module):
         pe = torch.zeros(max_len, 1, d_model)
         pe[:, 0, 0::2] = torch.sin(position * div_term)
         pe[:, 0, 1::2] = torch.cos(position * div_term)
+        pe = torch.transpose(pe, 0, 1)
         self.register_buffer('pe', pe)
 
     def forward(self, x):
@@ -113,7 +120,7 @@ class PositionalEncoding(nn.Module):
         Args:
             x: Tensor, shape [batch_size, seq_len, embedding_dim]
         """
-        x = x + self.pe[:x.size(0)]
+        x = x + self.pe[:, :x.size(1)]
         return self.dropout(x)
 
 
@@ -125,11 +132,11 @@ class CacheEncoderLayer(nn.TransformerEncoderLayer, Cache):
     def forward(self, x, src_mask=None, src_key_padding_mask=None):
         if self.cache_mode:
             start, end = self.data_slice(src_mask, 1)
-            x = self.self_attn(x[:, start:end], x, x,
-                               attn_mask=None,
+            y = self.self_attn(x[:, start:end], x, x,
+                               attn_mask=src_mask[start:end, :x.shape[1]],
                                key_padding_mask=src_key_padding_mask,
                                need_weights=False)[0]
-            x = self.norm1(x + self.dropout1(x))
+            x = self.norm1(x[:, start:end] + self.dropout1(y))
             x = self.norm2(x + self._ff_block(x))
             self.update_cache(x, 1)
             return self.cache
