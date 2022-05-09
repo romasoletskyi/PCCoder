@@ -5,6 +5,7 @@ import torch
 import time
 import numpy as np
 
+import params
 from transformer.model import PCCoder
 from env.env import ProgramEnv
 from dsl.example import Example
@@ -66,7 +67,7 @@ def choose_top(probs, top_p):
 
     return probs
 
-def sampling(start_env, max_program_len, model, timeout, top_p, temperature):
+def sampling(start_env, max_program_len, model: PCCoder, timeout, top_p, temperature):
     sample_size = 64
     start_time = time.time()
     end_time = start_time + timeout
@@ -76,10 +77,13 @@ def sampling(start_env, max_program_len, model, timeout, top_p, temperature):
 
     batch_indices = torch.arange(sample_size)[:, None]
     while time.time() < end_time:
+        print("batch")
         envs = [start_env.copy() for _ in range(sample_size)]
         statements = [[] for _ in range(sample_size)]
+        model.clear_cache()
+        model.set_mode(True)
 
-        for _ in range(max_program_len):
+        for step in range(max_program_len):
             for env, statement_list in zip(envs, statements):
                 if env.is_solution():
                     return {'result': statement_list, 'num_steps': num_steps, 'time': time.time() - start_time,
@@ -92,7 +96,7 @@ def sampling(start_env, max_program_len, model, timeout, top_p, temperature):
             env_encodings = torch.tensor(np.array([env.get_encoding() for env in envs]))
             num_inputs = torch.tensor(np.array([env.states[0].num_inputs for env in envs]))
             num_vars = torch.tensor(np.array([env.num_vars for env in envs]))
-            statement_pred, statement_log_probs, drop_indx = model.predict(env_encodings, num_inputs, num_vars)
+            statement_pred, statement_log_probs = model.predict(env_encodings, num_inputs, num_vars)
             statement_pred = torch.flip(torch.tensor(statement_pred), (1,))
 
             statement_probs = torch.exp(statement_log_probs[batch_indices, statement_pred] / temperature)
@@ -108,15 +112,16 @@ def sampling(start_env, max_program_len, model, timeout, top_p, temperature):
                 if envs[i] is None:
                     invalid_steps += 1
 
-            statements = [statement_list for env, statement_list in zip(envs, statements) if env is not None]
-            envs = [env for env in envs if env is not None]
-
-            if not envs:
+            alive_indices = np.array([i for i, env in enumerate(envs) if env is not None])
+            if len(alive_indices) == 0:
                 break
 
-            repeat_indices = np.random.randint(len(envs), size=sample_size - len(envs))
-            envs += [envs[i].copy() for i in repeat_indices]
-            statements += [statements[i].copy() for i in repeat_indices]
+            repeat_indices = np.random.randint(len(alive_indices), size=sample_size - len(alive_indices))
+            alive_indices = np.concatenate([alive_indices, alive_indices[repeat_indices]])
+
+            envs = [envs[i] for i in alive_indices]
+            statements = [statements[i] for i in alive_indices]
+            model.resample_cache(torch.tensor(alive_indices))
 
     return {'result': False, 'num_steps': num_steps, 'time': time.time() - start_time,
             'num_invalid': invalid_steps}
@@ -126,7 +131,7 @@ def solve_problem_worker(data):
     examples = Example.from_line(data)
     env = ProgramEnv(examples)
 
-    solution = sampling(env, max_program_len, model, timeout, top_p=0.9, temperature=0.5)
+    solution = sampling(env, max_program_len, model, timeout, top_p=0.9, temperature=1)
 
     counter.value += 1
     print("\rSolving problems... %d (failed: %d)" % (counter.value, fail_counter.value), end="")
