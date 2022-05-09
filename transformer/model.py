@@ -205,13 +205,13 @@ class BothWiseEncoder(nn.Module, Cache):
                                      params.var_encoder_size)
         self.pos_encoding = PositionalEncoding(params.var_encoder_size)
 
-        self.word_transformer = nn.TransformerEncoder(
-            nn.TransformerEncoderLayer(params.var_encoder_size, 8, 1024, batch_first=True), 5)
+        self.word_transformer = CacheTransformerEncoder(
+            CacheEncoderLayer(params.var_encoder_size, 8, 1024, batch_first=True), 5)
         self.example_transformer = nn.TransformerEncoder(
             nn.TransformerEncoderLayer(params.var_encoder_size, 8, 1024, batch_first=True), 3)
         self.encoder = nn.Linear(params.var_encoder_size, params.dense_output_size)
 
-        self.register_children([self.word_transformer, self.example_transformer])
+        self.register_children([self.word_transformer])
 
     def forward(self, x, mask):
         x, num_batches = self.embed_state(x)
@@ -221,11 +221,11 @@ class BothWiseEncoder(nn.Module, Cache):
         # x: [num_batches * params.num_examples, params.state_len, params.var_encoder_size]
         x = self.word_transformer(x, mask=mask)
 
-        x = torch.transpose(x.view(num_batches, params.num_examples, params.state_len, params.var_encoder_size), 1,
-                            2).reshape(num_batches * params.state_len, params.num_examples, params.var_encoder_size)
+        x = torch.transpose(x.view(num_batches, params.num_examples, -1, params.var_encoder_size), 1,
+                            2).reshape(-1, params.num_examples, params.var_encoder_size)
         # x: [num_batches * params.state_len, params.num_examples, params,var_encoder_size]
         x = self.example_transformer(x)
-        x = torch.transpose(x.view(num_batches, params.state_len, params.num_examples, params.var_encoder_size), 1,
+        x = torch.transpose(x.view(num_batches, -1, params.num_examples, params.var_encoder_size), 1,
                             2)
 
         x = F.relu(self.encoder(x))
@@ -274,7 +274,7 @@ class PCCoder(BaseModel, Cache):
         BaseModel.__init__(self)
         Cache.__init__(self)
 
-        self.encoder = Encoder()
+        self.encoder = BothWiseEncoder()
         self.operator_head = nn.Linear(params.dense_output_size, num_incomplete_statements + 1)
         self.variables_head = nn.ModuleList([PointerHead(params.dense_output_size)
                                              for _ in range(params.num_variable_head)])
