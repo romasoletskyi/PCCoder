@@ -152,7 +152,7 @@ class CacheTransformerEncoder(nn.TransformerEncoder, Cache):
 
 
 class Encoder(nn.Module, Cache):
-    def __init__(self):
+    def __init__(self, layer_num=5, n_head=8, dim_feedforward=1024):
         nn.Module.__init__(self)
         Cache.__init__(self)
 
@@ -162,7 +162,7 @@ class Encoder(nn.Module, Cache):
         self.pos_encoding = PositionalEncoding(params.var_encoder_size)
 
         self.transformer = CacheTransformerEncoder(
-            CacheEncoderLayer(params.var_encoder_size, 8, 1024, batch_first=True), 5)
+            CacheEncoderLayer(params.var_encoder_size, n_head, dim_feedforward, batch_first=True), layer_num)
         self.encoder = nn.Linear(params.var_encoder_size, params.dense_output_size)
 
         self.register_children([self.transformer])
@@ -270,11 +270,11 @@ class BaseModel(nn.Module):
 
 
 class PCCoder(BaseModel, Cache):
-    def __init__(self):
+    def __init__(self, encoder_gen):
         BaseModel.__init__(self)
         Cache.__init__(self)
 
-        self.encoder = BothWiseEncoder()
+        self.encoder = encoder_gen()
         self.operator_head = nn.Linear(params.dense_output_size, num_incomplete_statements + 1)
         self.variables_head = nn.ModuleList([PointerHead(params.dense_output_size)
                                              for _ in range(params.num_variable_head)])

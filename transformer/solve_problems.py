@@ -5,8 +5,7 @@ import torch
 import time
 import numpy as np
 
-import params
-from transformer.model import PCCoder
+from transformer.model import PCCoder, Encoder
 from env.env import ProgramEnv
 from dsl.example import Example
 from dsl.program import Program
@@ -69,7 +68,7 @@ def choose_top(probs, top_p):
 
 
 def sampling(start_env, max_program_len, model: PCCoder, timeout, top_p, temperature):
-    sample_size = 2
+    sample_size = 64
     start_time = time.time()
     end_time = start_time + timeout
 
@@ -99,11 +98,6 @@ def sampling(start_env, max_program_len, model: PCCoder, timeout, top_p, tempera
             statement_pred, statement_log_probs = model.predict(env_encodings, num_inputs, num_vars)
             statement_pred = torch.flip(torch.tensor(statement_pred), (1,))
 
-            model.set_mode(False)
-            slow_statement_pred, slow_statement_log_probs = model.predict(env_encodings, num_inputs, num_vars)
-            print(torch.max(torch.abs(slow_statement_log_probs - statement_log_probs)))
-            model.set_mode(True)
-
             statement_probs = torch.exp(statement_log_probs[batch_indices, statement_pred] / temperature)
             statement_probs /= torch.sum(statement_probs, 1)[:, None]
             statement_probs = choose_top(statement_probs, top_p)
@@ -119,9 +113,6 @@ def sampling(start_env, max_program_len, model: PCCoder, timeout, top_p, tempera
                     invalid_steps += 1
 
             alive_indices = np.array([i for i, env in enumerate(envs) if env is not None])
-            print(len(alive_indices))
-            if len(alive_indices) < sample_size:
-                a = 1
             if len(alive_indices) == 0:
                 break
 
@@ -132,14 +123,6 @@ def sampling(start_env, max_program_len, model: PCCoder, timeout, top_p, tempera
             statements = [statements[i] for i in alive_indices]
             model.resample_cache(torch.tensor(alive_indices))
 
-            for i in range(sample_size):
-                for j in range(sample_size):
-                    equal_cache = torch.equal(model.variables_head[1].cache[i],
-                                              model.variables_head[1].cache[j])
-                    equal_env = envs[i] == envs[j]
-                    if equal_env != equal_cache:
-                        print(i, j, equal_cache, equal_env)
-
     return {'result': False, 'num_steps': num_steps, 'time': time.time() - start_time,
             'num_invalid': invalid_steps}
 
@@ -148,7 +131,7 @@ def solve_problem_worker(data):
     examples = Example.from_line(data)
     env = ProgramEnv(examples)
 
-    solution = sampling(env, max_program_len, model, timeout, top_p=0.9, temperature=1)
+    solution = sampling(env, max_program_len, model, timeout, top_p=0.9, temperature=1.2)
 
     counter.value += 1
     print("\rSolving problems... %d (failed: %d)" % (counter.value, fail_counter.value), end="")
@@ -176,7 +159,7 @@ def main():
 
     problems = load_problems(args.input_path)
 
-    model = PCCoder()
+    model = PCCoder(lambda: Encoder())
     model.load(args.model_path)
 
     model.eval()
